@@ -73,21 +73,27 @@ func newListCmd() *cobra.Command {
 }
 
 func newFetchCmd() *cobra.Command {
-	return &cobra.Command{
+	var outWidth int
+	cmd := &cobra.Command{
 		Use:   "fetch <source-id>",
 		Short: "Fetch and render a specific source now",
 		Args:  cobra.ExactArgs(1),
 		Run: func(_ *cobra.Command, args []string) {
 			p := mustPaperboy()
-			res, err := p.RenderFor(context.Background(), args[0])
+			opts := paperboy.RenderOptions{OutputWidth: outWidth}
+			res, err := p.RenderFor(context.Background(), args[0], opts)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
-			fmt.Printf("rendered %s (%d days old, %d bytes, fetched_at=%s)\n",
-				res.SourceID, res.DaysOld, len(res.Image), res.FetchedAt.Format("2006-01-02"))
+			fmt.Printf("rendered %s (%d days old, %dx%d, %d bytes, fetched_at=%s)\n",
+				res.SourceID, res.DaysOld, res.Width, res.Height, len(res.Image),
+				res.FetchedAt.Format("2006-01-02"))
 		},
 	}
+	cmd.Flags().IntVarP(&outWidth, "width", "w", 0,
+		"output width in pixels (default = master cache width)")
+	return cmd
 }
 
 func newHealthCmd() *cobra.Command {

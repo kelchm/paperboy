@@ -68,19 +68,37 @@ You should never see "Not Found." That's the bug fix.
 | Endpoint | Description |
 |---|---|
 | `GET /current.png` | The current rotation slot, advancing each call |
-| `GET /next.png` | Force-advance and return the next image |
 | `GET /paper/{id}.png` | Render a specific source by id |
 | `GET /sources` | JSON list of configured sources + health |
 | `GET /health` | Liveness probe (always 200 if process is up) |
 | `GET /healthz` | Readiness probe (200 only when at least one source has a usable image) |
+
+Image endpoints accept a `?w=<int>` query param to control output width (see *Sizing* below). The response includes `X-Paperboy-Source`, `X-Paperboy-Width`, `X-Paperboy-Height`, and `X-Paperboy-Days-Old` headers; if the image is a stale fallback (because no live fetch succeeded), `X-Paperboy-Stale: true` is also set.
+
+## Sizing
+
+The client controls output dimensions, not the server. This is important because the same paperboy instance can serve a 13" Visionect, a TRMNL, a browser preview, and a Home Assistant card — each with different pixel budgets.
+
+- **Master width** (`PAPERBOY_WIDTH`, default 1600px): the resolution we rasterize and cache at. This is the *quality ceiling* — render once, slice many ways.
+- **Output width** (`?w=<int>` per request): the actual width the client wants. The server resizes the cached master down to this. Aspect ratio is always preserved; height is auto-computed.
+- **Upscaling is rejected.** Requests for an output width larger than the master are silently capped at the master to avoid text-softening artifacts.
+
+```sh
+curl http://localhost:8080/current.png            # master width (1600px)
+curl http://localhost:8080/current.png?w=800      # 800px wide, height proportional
+curl http://localhost:8080/paper/ny-nyt.png?w=480 # specific source, 480px wide
+```
 
 ## Embedding as a library
 
 ```go
 import "github.com/kelchm/paperboy/pkg/paperboy"
 
-p, _ := paperboy.New(paperboy.Config{...})
-img, meta, err := p.RenderNext(ctx)
+p, _ := paperboy.New(paperboy.Config{DataDir: "./data"})
+
+res, err := p.RenderNext(ctx)                                              // master width
+res, err := p.RenderNext(ctx, paperboy.RenderOptions{OutputWidth: 800})    // resized
+// res.Image is PNG bytes; res.Width / res.Height carry actual dimensions
 ```
 
 ## Configuration
@@ -91,7 +109,7 @@ All config is via environment variables (validated at startup):
 |---|---|---|
 | `PAPERBOY_PORT` | `8080` | HTTP listen port |
 | `PAPERBOY_DATA_DIR` | `./data` | Where cached images and state.json live |
-| `PAPERBOY_WIDTH` | `1600` | Target image width in pixels |
+| `PAPERBOY_WIDTH` | `1600` | **Master** width in pixels — the cache/quality ceiling. Per-request `?w=` resizes down from here. |
 | `PAPERBOY_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `PAPERBOY_CROP_OCR` | `false` | Enable optional OCR-based masthead refinement |
 

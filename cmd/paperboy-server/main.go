@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -141,7 +142,12 @@ func handleSources(p *paperboy.Paperboy) http.HandlerFunc {
 
 func handleCurrent(p *paperboy.Paperboy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		res, err := p.RenderNext(r.Context())
+		opts, err := parseRenderOpts(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		res, err := p.RenderNext(r.Context(), opts)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
@@ -153,7 +159,12 @@ func handleCurrent(p *paperboy.Paperboy) http.HandlerFunc {
 func handlePaper(p *paperboy.Paperboy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
-		res, err := p.RenderFor(r.Context(), id)
+		opts, err := parseRenderOpts(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		res, err := p.RenderFor(r.Context(), id, opts)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -162,11 +173,31 @@ func handlePaper(p *paperboy.Paperboy) http.HandlerFunc {
 	}
 }
 
+// parseRenderOpts extracts per-request rendering options from query params.
+//
+// Supported params:
+//
+//	?w=<int>   output width in pixels; aspect ratio preserved.
+//	           Capped at the master width (no upscaling).
+func parseRenderOpts(r *http.Request) (paperboy.RenderOptions, error) {
+	var opts paperboy.RenderOptions
+	if ws := r.URL.Query().Get("w"); ws != "" {
+		v, err := strconv.Atoi(ws)
+		if err != nil || v <= 0 {
+			return opts, fmt.Errorf("invalid w=%q (want positive integer)", ws)
+		}
+		opts.OutputWidth = v
+	}
+	return opts, nil
+}
+
 func writeImage(w http.ResponseWriter, res *paperboy.Result) {
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Paperboy-Source", res.SourceID)
 	w.Header().Set("X-Paperboy-Days-Old", fmt.Sprintf("%d", res.DaysOld))
+	w.Header().Set("X-Paperboy-Width", fmt.Sprintf("%d", res.Width))
+	w.Header().Set("X-Paperboy-Height", fmt.Sprintf("%d", res.Height))
 	if res.Stale {
 		w.Header().Set("X-Paperboy-Stale", "true")
 	}

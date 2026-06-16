@@ -13,12 +13,17 @@
 package paperboy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	_ "image/png" // register PNG decoder for image.Decode
 	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/disintegration/imaging"
 
 	"github.com/kelchm/paperboy/internal/cache"
 	"github.com/kelchm/paperboy/internal/crop"
@@ -55,6 +60,20 @@ type Config struct {
 	Logger *slog.Logger
 }
 
+// RenderOptions are per-call overrides. The zero value means "use defaults":
+// return the master-width cached PNG untouched.
+//
+// The server-side PAPERBOY_WIDTH (Config.Width) is the *master* width — the
+// resolution we rasterize and cache at, which acts as a quality ceiling.
+// Per-call OutputWidth resizes down from that master before returning.
+// Requests for OutputWidth larger than the master are capped at the master
+// to avoid upscaling artifacts (text softening).
+type RenderOptions struct {
+	// OutputWidth is the desired width in pixels. 0 means "no resize"
+	// (return the master). Values larger than the master are capped.
+	OutputWidth int
+}
+
 // Result is what a render call returns.
 type Result struct {
 	Image     []byte    // rendered PNG bytes
@@ -62,6 +81,8 @@ type Result struct {
 	FetchedAt time.Time // when the underlying PDF was acquired
 	Stale     bool      // true if served from cache because no live fetch succeeded
 	DaysOld   int       // 0 for today, 1 for yesterday, etc.
+	Width     int       // actual pixel width of Image
+	Height    int       // actual pixel height of Image
 }
 
 // Health describes the per-source health of the engine.
@@ -142,17 +163,22 @@ func New(cfg Config) (*Paperboy, error) {
 
 // RenderNext returns the next paper in the rotation, advancing the rotation
 // index. Falls back across sources and dates on failure.
-func (p *Paperboy) RenderNext(ctx context.Context) (*Result, error) {
+//
+// Pass a RenderOptions value to control output dimensions per-call:
+//
+//	res, _ := p.RenderNext(ctx)                                    // master width
+//	res, _ := p.RenderNext(ctx, paperboy.RenderOptions{OutputWidth: 800})
+func (p *Paperboy) RenderNext(ctx context.Context, opts ...RenderOptions) (*Result, error) {
 	r, err := p.picker.PickNext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return p.readResult(r)
+	return p.readResult(r, optsOrDefault(opts))
 }
 
 // RenderFor returns a render for a specific source. Does not advance the
 // rotation index.
-func (p *Paperboy) RenderFor(ctx context.Context, sourceID string) (*Result, error) {
+func (p *Paperboy) RenderFor(ctx context.Context, sourceID string, opts ...RenderOptions) (*Result, error) {
 	src := source.ByID(p.sources, sourceID)
 	if src == nil {
 		return nil, fmt.Errorf("paperboy: unknown source %q", sourceID)
@@ -162,10 +188,17 @@ func (p *Paperboy) RenderFor(ctx context.Context, sourceID string) (*Result, err
 		if err == nil {
 			return p.readResult(&rotation.Result{
 				SourceID: sourceID, PNGPath: path, FetchedAt: ts, DaysOld: d,
-			})
+			}, optsOrDefault(opts))
 		}
 	}
 	return nil, fmt.Errorf("paperboy: no usable paper for %s in last 3 days", sourceID)
+}
+
+func optsOrDefault(opts []RenderOptions) RenderOptions {
+	if len(opts) > 0 {
+		return opts[0]
+	}
+	return RenderOptions{}
 }
 
 // ListSources returns the configured sources.
@@ -189,16 +222,50 @@ func (p *Paperboy) HealthSnapshot() Health {
 	return out
 }
 
-func (p *Paperboy) readResult(r *rotation.Result) (*Result, error) {
+func (p *Paperboy) readResult(r *rotation.Result, opts RenderOptions) (*Result, error) {
 	data, err := os.ReadFile(r.PNGPath)
 	if err != nil {
 		return nil, fmt.Errorf("paperboy: read rendered image: %w", err)
 	}
+
+	masterCfg := WidthMaster(p.cfg)
+	out := opts.OutputWidth
+	if out > masterCfg {
+		out = masterCfg
+	}
+
+	// Decode once so we always know exact dimensions, even for the
+	// no-resize path.
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("paperboy: decode cached png: %w", err)
+	}
+
+	if out > 0 && out != img.Bounds().Dx() {
+		img = imaging.Resize(img, out, 0, imaging.Lanczos)
+		var buf bytes.Buffer
+		if err := imaging.Encode(&buf, img, imaging.PNG); err != nil {
+			return nil, fmt.Errorf("paperboy: encode resized png: %w", err)
+		}
+		data = buf.Bytes()
+	}
+
 	return &Result{
 		Image:     data,
 		SourceID:  r.SourceID,
 		FetchedAt: r.FetchedAt,
 		Stale:     r.Stale,
 		DaysOld:   r.DaysOld,
+		Width:     img.Bounds().Dx(),
+		Height:    img.Bounds().Dy(),
 	}, nil
+}
+
+// WidthMaster returns the master (cache) width for a Config, applying the
+// default if unset.
+func WidthMaster(c Config) int {
+	if c.Width <= 0 {
+		return 1600
+	}
+	return c.Width
 }
