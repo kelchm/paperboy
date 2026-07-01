@@ -38,6 +38,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+      - uses: docker/setup-qemu-action@v4   # register arm64 emulation for the cross-build
       - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
@@ -65,13 +66,12 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
-          # Single-arch image, no attestation consumers: keep a plain manifest
-          # (default provenance would make it an OCI index w/ unknown/unknown).
+          # No attestation consumers: skip provenance so the manifest list holds
+          # only the real platforms (default provenance adds unknown/unknown).
           provenance: false
-          # amd64 only: deploy target is amd64 and there's no arm64 consumer.
-          # go-fitz ships arm64 static libs, so add linux/arm64 here if that
-          # ever changes.
-          platforms: linux/amd64
+          # Multi-arch: go-fitz bundles prebuilt static MuPDF for both arches,
+          # so the emulated arm64 cgo build just links (no C source compile).
+          platforms: linux/amd64,linux/arm64
           # workflow_dispatch is a build-only sanity check; don't publish it.
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
